@@ -1,26 +1,466 @@
-create or replace function public.resumo_24h(p_device text)
-returns table (
-  medido_em     timestamptz,
-  distancia_cm  numeric,
-  vazao_max     numeric,
-  bomba_alguma  boolean
-)
-language sql
-stable
-security invoker
-set search_path = public
-as $$
-  select distinct on (date_trunc('hour', m.medido_em))
-         m.medido_em,
-         m.distancia_cm,
-         max(m.vazao_lpm)        over w,
-         bool_or(m.bomba_ligada) over w
-    from public.medicoes m
-   where m.device_id = p_device
-     and m.medido_em >= now() - interval '24 hours'
-     and m.distancia_cm is not null
-  window w as (partition by date_trunc('hour', m.medido_em))
-   order by date_trunc('hour', m.medido_em), m.medido_em desc;
-$$;
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SCADA · Caixa d'água</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0E1417; --panel: #151C21; --panel-2: #1A2227; --line: #2A353B; --line-strong: #3C4A51;
+    --text: #D8E0E3; --muted: #7C8C93; --dim: #556168;
+    --cyan: #3FC6D6; --amber: #E2A23B; --red: #E05A4E; --green: #45C27E;
+    font-family: 'IBM Plex Sans', system-ui, sans-serif;
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #EEF1F2; --panel: #FFFFFF; --panel-2: #F6F8F9; --line: #D7DEE1; --line-strong: #BCC7CB;
+      --text: #15202A; --muted: #5C6B72; --dim: #93A1A7;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-size: 15px; line-height: 1.4; min-height: 100%; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 0 48px; }
+  .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; padding: 16px 20px; border-bottom: 1px solid var(--line); margin-bottom: 20px; }
+  .brand { display: flex; align-items: baseline; gap: 10px; }
+  .brand .tag { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--cyan); border: 1px solid var(--cyan); border-radius: 3px; padding: 2px 6px; letter-spacing: .06em; }
+  .brand h1 { font-size: 17px; font-weight: 600; margin: 0; }
+  .live { display: flex; align-items: center; gap: 8px; font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--muted); }
+  .live .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); }
+  .pad { padding: 0 20px; }
+  .label { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .08em; margin: 0 0 10px; }
 
-grant execute on function public.resumo_24h(text) to anon, authenticated;
+  .pid { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 6px; margin-bottom: 24px; }
+  .pid svg { width: 100%; height: auto; display: block; }
+  .pid .pipe { fill: none; stroke: var(--line-strong); stroke-width: 7; }
+  .pid .pipe-in { fill: none; stroke: var(--panel-2); stroke-width: 3; }
+  .pid .flow { fill: none; stroke: var(--cyan); stroke-width: 2; stroke-dasharray: 8 9; opacity: 0; transition: opacity .3s; }
+  .pid.on .flow { opacity: 1; animation: fl .8s linear infinite; }
+  @keyframes fl { to { stroke-dashoffset: -17; } }
+  .pid .well { fill: var(--panel-2); stroke: var(--line-strong); stroke-width: 2; }
+  .pid .wwater { fill: var(--cyan); opacity: .22; }
+  .pid .pump-o { fill: var(--line-strong); stroke: var(--dim); stroke-width: 2; }
+  .pid.on .pump-o { stroke: var(--green); }
+  .pid .pump-i { fill: none; stroke: var(--panel); stroke-width: 1.5; }
+  .pid .tank { fill: var(--panel-2); stroke: var(--line-strong); stroke-width: 2; }
+  .pid .water { fill: var(--cyan); opacity: .5; transition: y .9s ease, height .9s ease; }
+  .pid .crit { stroke: var(--red); stroke-width: 1.5; stroke-dasharray: 5 4; }
+  .pid .inst { fill: var(--panel); stroke: var(--line-strong); stroke-width: 1.5; }
+  .pid .inst-dot { fill: var(--cyan); }
+  .pid .echo { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 2 4; transition: y2 .9s ease; }
+
+  .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; margin-bottom: 24px; }
+  @media (max-width: 760px) { .kpis { grid-template-columns: repeat(2, 1fr); } }
+  .kpi { background: var(--panel); padding: 14px 16px; }
+  .kpi .l { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; display: flex; justify-content: space-between; }
+  .kpi .v { font-family: 'IBM Plex Mono', monospace; font-size: 30px; font-weight: 600; margin-top: 6px; }
+  .kpi .v small { font-size: 13px; font-weight: 400; color: var(--muted); margin-left: 4px; }
+  .kpi .s { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .chip { font-family: 'IBM Plex Mono', monospace; font-size: 10px; padding: 1px 6px; border-radius: 3px; border: 1px solid currentColor; }
+  .chip.on { color: var(--green); } .chip.off { color: var(--dim); }
+
+  .grid2 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; margin-bottom: 24px; }
+  @media (max-width: 640px) { .grid2 { grid-template-columns: 1fr; } }
+  .grid2 .g { background: var(--panel); padding: 12px 16px; }
+  .grid2 h3 { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--cyan); text-transform: uppercase; letter-spacing: .07em; margin: 0 0 8px; }
+  .grid2 .row { display: flex; justify-content: space-between; padding: 5px 0; font-size: 13px; border-top: 1px solid var(--line); }
+  .grid2 .row:first-of-type { border-top: 0; }
+  .grid2 .row span:first-child { color: var(--muted); }
+  .grid2 .row span:last-child { font-family: 'IBM Plex Mono', monospace; }
+
+  .panel-box { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 14px 16px; margin-bottom: 24px; }
+  .chart-box { position: relative; height: 230px; }
+  .chart-box svg { width: 100%; height: 100%; display: block; overflow: visible; }
+  .chart-box svg text { font-family: 'IBM Plex Mono', monospace; font-size: 11px; fill: var(--muted); }
+  .chart-box svg .grid { stroke: var(--line); stroke-width: 1; }
+  .chart-box svg .crit { stroke: var(--red); stroke-width: 1; stroke-dasharray: 4 3; }
+  .legend { display: flex; gap: 18px; font-size: 12px; color: var(--muted); margin-bottom: 10px; font-family: 'IBM Plex Mono', monospace; }
+  .legend i { display: inline-block; width: 14px; height: 2px; vertical-align: middle; margin-right: 6px; }
+
+  .alarms { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+  .alarms table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .alarms th { text-align: left; font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; padding: 8px 14px; border-bottom: 1px solid var(--line); font-weight: 400; }
+  .alarms td { padding: 7px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  .alarms tr:last-child td { border-bottom: 0; }
+  .alarms .t { font-family: 'IBM Plex Mono', monospace; color: var(--muted); white-space: nowrap; }
+  .sev { font-family: 'IBM Plex Mono', monospace; font-size: 10px; padding: 1px 6px; border-radius: 3px; white-space: nowrap; }
+  .sev.warn { color: var(--red); border: 1px solid var(--red); }
+  .sev.info { color: var(--dim); border: 1px solid var(--dim); }
+  @media (prefers-reduced-motion: reduce) { .pid.on .flow { animation: none; } .pid .water { transition: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <div class="brand"><span class="tag">UPX</span><h1>Caixa d'água — bombeamento</h1></div>
+    <div class="live"><span class="dot" id="dot"></span><span id="ultima">carregando…</span></div>
+  </div>
+
+  <div class="pad">
+    <p class="label">Diagrama · tempo real · histórico das últimas 24 h (1 ponto por hora)</p>
+    <div class="pid" id="pid">
+      <svg viewBox="0 0 720 300" role="img" aria-label="Diagrama do sistema de bombeamento: poço com bomba, tubulação com sensor de vazão e reservatório com sensor de nível">
+        <clipPath id="tc"><rect x="523" y="60" width="138" height="140"/></clipPath>
+
+        <rect class="well" x="60" y="200" width="120" height="70"/>
+        <rect class="wwater" x="60" y="225" width="120" height="45"/>
+
+        <rect class="pump-o" id="pumpBox" x="100" y="232" width="40" height="26" rx="4"/>
+        <circle class="pump-i" id="pumpRing" cx="120" cy="245" r="8"/>
+        <path class="pump-i" d="M117 241 l6 4 l-6 4 Z" fill="var(--dim)" id="pumpArrow"/>
+
+        <path class="pipe" d="M120 232 V130 H522"/>
+        <path class="pipe-in" d="M120 232 V130 H522"/>
+        <path class="flow" d="M120 232 V130 H522"/>
+
+        <circle class="inst" cx="340" cy="130" r="15"/>
+        <circle class="inst-dot" cx="340" cy="130" r="3"/>
+
+        <rect class="tank" x="522" y="60" width="140" height="140"/>
+        <rect class="water" id="waterFill" x="523" y="200" width="138" height="0" clip-path="url(#tc)"/>
+        <line class="crit" x1="522" x2="662" y1="81" y2="81"/>
+
+        <circle class="inst" cx="592" cy="24" r="15"/>
+        <circle class="inst-dot" cx="592" cy="24" r="3"/>
+        <line class="echo" id="eco" x1="592" x2="592" y1="39" y2="130"/>
+      </svg>
+    </div>
+
+    <div class="kpis">
+      <div class="kpi">
+        <div class="l">P-01 · bomba<span class="chip off" id="pumpChip">—</span></div>
+        <div class="v" id="pumpValue">—</div>
+        <div class="s" id="pumpDesde">—</div>
+      </div>
+      <div class="kpi">
+        <div class="l">FT-01 · vazão</div>
+        <div class="v" id="flowValue">—</div>
+        <div class="s" id="avgValue">—</div>
+      </div>
+      <div class="kpi">
+        <div class="l">LT-01 · nível</div>
+        <div class="v" id="nivel">—</div>
+        <div class="s" id="levelDist">—</div>
+      </div>
+      <div class="kpi">
+        <div class="l">Acumulado hoje</div>
+        <div class="v" id="volumeValue">—</div>
+        <div class="s" id="pumpCiclos">—</div>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="g">
+        <h3>Bomba</h3>
+        <div class="row"><span>Estado</span><span id="g-pump">—</span></div>
+        <div class="row"><span>Desde</span><span id="g-pumpDesde">—</span></div>
+        <div class="row"><span>Ligada hoje</span><span id="g-pumpHoje">—</span></div>
+      </div>
+      <div class="g">
+        <h3>Vazão</h3>
+        <div class="row"><span>Instantânea</span><span id="g-flow">—</span></div>
+        <div class="row"><span>Média, 10 leituras</span><span id="g-avg">—</span></div>
+        <div class="row"><span>Máxima hoje</span><span id="g-max">—</span></div>
+      </div>
+      <div class="g">
+        <h3>Nível</h3>
+        <div class="row"><span>Volume</span><span id="g-litros">—</span></div>
+        <div class="row"><span>Distância do sensor</span><span id="g-dist">—</span></div>
+        <div class="row"><span>Capacidade</span><span id="g-cap">—</span></div>
+      </div>
+    </div>
+
+    <div class="panel-box">
+      <p class="label" style="margin-bottom:4px">Últimas 24 horas</p>
+      <div class="legend"><span><i style="background:var(--cyan)"></i>LT-01 nível %</span><span><i style="background:var(--amber)"></i>FT-01 vazão L/min</span></div>
+      <div class="chart-box"><svg id="historyChart" viewBox="0 0 780 210" aria-label="Gráfico de nível e vazão nas últimas 24 horas"></svg></div>
+    </div>
+
+    <div class="panel-box">
+      <p class="label" style="margin-bottom:4px">Volume recuperado por leitura</p>
+      <div class="legend"><span><i style="background:var(--cyan)"></i>mL desde a leitura anterior</span></div>
+      <div class="chart-box" style="height:180px"><svg id="volumeChart" viewBox="0 0 780 180" aria-label="Gráfico de volume de água recuperado em cada leitura"></svg></div>
+    </div>
+
+    <p class="label">Leituras do período</p>
+    <div class="alarms" style="margin-bottom:24px">
+      <table>
+        <thead><tr><th>Hora</th><th>Nível</th><th>Vazão</th><th>Bomba</th><th>Volume desde a leitura anterior</th></tr></thead>
+        <tbody id="readingsTable"></tbody>
+      </table>
+    </div>
+
+    <p class="label">Eventos e alarmes</p>
+    <div class="alarms">
+      <table>
+        <thead><tr><th>Hora</th><th>Severidade</th><th>Mensagem</th></tr></thead>
+        <tbody id="eventLog"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script>
+  // ===================== CONFIGURAÇÃO =====================
+  const SUPABASE_URL = "https://zlyrpqcnlwjtnozaaiov.supabase.co";
+  const SUPABASE_KEY = "COLE_AQUI_A_CHAVE_sb_publishable";   // NUNCA a sb_secret
+  const DEVICE       = "esp32_bombeamento_01";
+  // ========================================================
+
+  // medidas do recipiente: são preenchidas com a tabela "calibracao" do banco
+  let CAP_L = 1, ALTURA_CM = 15, OFFSET_CM = 2;
+  const pts = [], eventos = [];
+  const fmt = (n, d = 1) => n.toLocaleString('pt-BR', { minimumFractionDigits: d, maximumFractionDigits: d });
+  const hhmm = d => d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  const $ = id => document.getElementById(id);
+
+  // gráficos desenhados à mão em SVG — sem biblioteca externa
+  const SVGNS = 'http://www.w3.org/2000/svg';
+  function svgEl(tag, attrs) {
+    const el = document.createElementNS(SVGNS, tag);
+    for (const k in attrs) el.setAttribute(k, attrs[k]);
+    return el;
+  }
+  function desenharHistorico(pts) {
+    const svg = $('historyChart'); svg.innerHTML = '';
+    const L = 42, R = 738, T = 10, B = 168, n = pts.length;
+    const px = i => L + (i / (n - 1)) * (R - L);
+    const pyNivel = v => B - (v / 100) * (B - T);
+    const pyVazao = v => B - (Math.min(v, 1) / 1) * (B - T);
+
+    [0, 25, 50, 75, 100].forEach(v => {
+      const y = pyNivel(v);
+      svg.appendChild(svgEl('line', { class: 'grid', x1: L, x2: R, y1: y, y2: y }));
+      svg.appendChild(svgEl('text', { x: L - 8, y: y + 4, 'text-anchor': 'end' })).textContent = v;
+    });
+    [0, .5, 1].forEach(v => {
+      const y = pyVazao(v);
+      const t = svgEl('text', { x: R + 8, y: y + 4, 'text-anchor': 'start', fill: '#E2A23B' });
+      t.textContent = fmt(v, 1); svg.appendChild(t);
+    });
+    const yCrit = pyNivel(15);
+    svg.appendChild(svgEl('line', { class: 'crit', x1: L, x2: R, y1: yCrit, y2: yCrit }));
+
+    const linhaNivel = pts.map((p, i) => `${px(i)},${pyNivel(p.nivel)}`).join(' ');
+    svg.appendChild(svgEl('polyline', { points: linhaNivel, fill: 'none', stroke: '#3FC6D6', 'stroke-width': 2.5, 'stroke-linejoin': 'round' }));
+
+    let dVazao = `M ${px(0)} ${pyVazao(pts[0].vazao)}`;
+    for (let i = 1; i < n; i++) dVazao += ` L ${px(i)} ${pyVazao(pts[i - 1].vazao)} L ${px(i)} ${pyVazao(pts[i].vazao)}`;
+    svg.appendChild(svgEl('path', { d: dVazao, fill: 'none', stroke: '#E2A23B', 'stroke-width': 2 }));
+
+    pts.forEach((p, i) => {
+      svg.appendChild(svgEl('circle', { cx: px(i), cy: pyNivel(p.nivel), r: 3, fill: '#3FC6D6' }));
+      if (i % 2 === 0) svg.appendChild(svgEl('text', { x: px(i), y: B + 18, 'text-anchor': 'middle' })).textContent = hhmm(p.t);
+    });
+  }
+  function desenharVolume(labels, valores) {
+    const svg = $('volumeChart'); svg.innerHTML = '';
+    const L = 42, R = 738, T = 10, B = 142, n = valores.length;
+    const max = Math.max(...valores, 100);
+    const px = i => L + (i / n) * (R - L);
+    const bw = ((R - L) / n) * .6;
+    const py = v => B - (v / max) * (B - T);
+
+    [0, max / 2, max].forEach(v => {
+      const y = py(v);
+      svg.appendChild(svgEl('line', { class: 'grid', x1: L, x2: R, y1: y, y2: y }));
+      svg.appendChild(svgEl('text', { x: L - 8, y: y + 4, 'text-anchor': 'end' })).textContent = Math.round(v);
+    });
+    valores.forEach((v, i) => {
+      const x = px(i) + ((R - L) / n - bw) / 2;
+      svg.appendChild(svgEl('rect', { x, y: py(v), width: bw, height: B - py(v), fill: '#3FC6D6', rx: 2 }));
+      if (v > 0) svg.appendChild(svgEl('text', { x: x + bw / 2, y: py(v) - 6, 'text-anchor': 'middle', fill: 'var(--text)' })).textContent = fmt(v, 0);
+      if (i % 2 === 0) svg.appendChild(svgEl('text', { x: x + bw / 2, y: B + 18, 'text-anchor': 'middle' })).textContent = labels[i];
+    });
+  }
+
+  function render() {
+    const l = pts[pts.length - 1];
+    const dia = l.t.toDateString();
+    const hoje = pts.filter(x => x.t.toDateString() === dia);
+    $('ultima').textContent = `última leitura ${hhmm(l.t)}`;
+    $('pid').classList.toggle('on', l.bomba);
+
+    $('pumpValue').textContent = l.bomba ? 'LIGADA' : 'DESLIGADA';
+    $('pumpChip').textContent = l.bomba ? 'ON' : 'OFF';
+    $('pumpChip').className = 'chip ' + (l.bomba ? 'on' : 'off');
+    let i = pts.length - 1; while (i > 0 && pts[i - 1].bomba === l.bomba) i--;
+    const desde = i === 0 ? '> 24 h' : `desde ${hhmm(pts[i].t)}`;
+    $('pumpDesde').textContent = desde;
+    // tempo ligado estimado por ciclo = volume recuperado / vazão daquele ciclo
+    let ligadaMin = 0, ciclos = 0;
+    for (let k = 1; k < hoje.length; k++) {
+      const a = hoje[k - 1], b = hoje[k];
+      if (b.bomba && !a.bomba) ciclos++;
+      const subida = b.nivel - a.nivel;
+      if (subida > 0 && b.vazao > 0) ligadaMin += (subida / 100 * CAP_L) / b.vazao;
+    }
+    $('pumpCiclos').textContent = `${ciclos} ciclo(s) hoje`;
+    $('g-pump').textContent = l.bomba ? 'Ligada' : 'Desligada';
+    $('g-pumpDesde').textContent = desde.replace('desde ', '');
+    $('g-pumpHoje').textContent = `≈ ${ligadaMin.toFixed(1)} min (estimado)`;
+
+    $('flowValue').innerHTML = `${fmt(l.vazao, 2)}<small>L/min</small>`;
+    const ult = pts.slice(-10).filter(x => x.vazao > 0);
+    const media = ult.length ? fmt(ult.reduce((s, x) => s + x.vazao, 0) / ult.length, 2) : '0,00';
+    $('avgValue').textContent = `méd. ${media} L/min (bomba ligada)`;
+    const maxHoje = fmt(Math.max(...hoje.map(x => x.vazao)), 2);
+    $('g-flow').textContent = `${fmt(l.vazao, 2)} L/min`;
+    $('g-avg').textContent = `${media} L/min`;
+    $('g-max').textContent = `${maxHoje} L/min`;
+
+    // volume do dia = soma das subidas de nível entre as leituras
+    let volMl = 0;
+    for (let k = 1; k < hoje.length; k++) volMl += Math.max(0, hoje[k].nivel - hoje[k - 1].nivel) / 100 * CAP_L * 1000;
+    $('volumeValue').innerHTML = `${fmt(volMl, 0)}<small>mL hoje</small>`;
+
+    $('nivel').innerHTML = `${l.nivel.toFixed(0)}<small>%</small>`;
+    const distCm = OFFSET_CM + (1 - l.nivel / 100) * (ALTURA_CM - OFFSET_CM);
+    $('levelDist').textContent = `sensor a ${distCm.toFixed(1)} cm`;
+    $('g-litros').textContent = `${fmt(l.nivel * CAP_L * 10, 0)} mL`;
+    $('g-dist').textContent = `${distCm.toFixed(1)} cm`;
+    $('g-cap').textContent = `${fmt(CAP_L, 1)} L (${fmt(CAP_L * 1000, 0)} mL)`;
+
+    const h = l.nivel * 1.4;
+    $('waterFill').setAttribute('y', 200 - h); $('waterFill').setAttribute('height', h);
+    $('eco').setAttribute('y2', 200 - h);
+
+    desenharHistorico(pts);
+
+    const volPorLeitura = pts.map((x, k) => k === 0 ? 0 : Math.max(0, x.nivel - pts[k - 1].nivel) / 100 * CAP_L * 1000);
+    desenharVolume(pts.map(x => hhmm(x.t)), volPorLeitura);
+
+    const rt = $('readingsTable'); rt.innerHTML = '';
+    pts.forEach((x, k) => {
+      const tr = document.createElement('tr');
+      const vol = k === 0 ? '—' : `${fmt(volPorLeitura[k], 0)} mL`;
+      tr.innerHTML = `<td class="t">${hhmm(x.t)}</td><td>${x.nivel}%</td>` +
+        `<td>${x.vazao > 0 ? fmt(x.vazao, 2) + ' L/min' : '—'}</td>` +
+        `<td><span class="chip ${x.bomba ? 'on' : 'off'}">${x.bomba ? 'Ligada' : 'Desligada'}</span></td>` +
+        `<td>${vol}</td>`;
+      rt.appendChild(tr);
+    });
+
+    const tb = $('eventLog'); tb.innerHTML = '';
+    eventos.slice(-8).reverse().forEach(e => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td class="t">${hhmm(e.t)}</td><td><span class="sev ${e.tipo}">${e.tipo === 'warn' ? 'ALARME' : 'EVENTO'}</span></td><td>${e.msg}</td>`;
+      tb.appendChild(tr);
+    });
+  }
+
+  // =====================================================================
+  // Ligação com o Supabase
+  // =====================================================================
+  const sbx = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+  const num = v => (v === null || v === undefined) ? null : Number(v);
+  let calib = null, ocupado = false, ultimo = 0;
+
+  // distância medida (cm) -> nível em %, usando a calibração
+  function nivelPct(d) {
+    const p = (ALTURA_CM - d) / (ALTURA_CM - OFFSET_CM) * 100;
+    return Math.round(Math.max(0, Math.min(100, p)));
+  }
+
+  async function carregar() {
+    if (ocupado) return;
+    ocupado = true;
+    ultimo = Date.now();
+    const dot = $('dot');
+    try {
+      if (!calib) {
+        const r = await sbx.from('calibracao').select('*').eq('device_id', DEVICE).maybeSingle();
+        if (r.error) throw r.error;
+        if (!r.data) throw new Error('Sem registro em calibracao para ' + DEVICE);
+        calib = r.data;
+        CAP_L     = num(calib.capacidade_l);
+        ALTURA_CM = num(calib.distancia_vazia_cm) ?? num(calib.limiar_liga_cm);     // vazio
+        OFFSET_CM = num(calib.distancia_cheia_cm) ?? num(calib.limiar_desliga_cm);  // cheio
+      }
+
+      const [hist, ult, ev] = await Promise.all([
+        sbx.rpc('resumo_24h', { p_device: DEVICE }),
+        sbx.from('medicoes')
+          .select('medido_em,distancia_cm,vazao_lpm,bomba_ligada')
+          .eq('device_id', DEVICE).not('distancia_cm', 'is', null)
+          .order('medido_em', { ascending: false }).limit(1),
+        sbx.from('eventos')
+          .select('ocorrido_em,tipo,mensagem')
+          .eq('device_id', DEVICE)
+          .order('ocorrido_em', { ascending: false }).limit(8)
+      ]);
+      for (const r of [hist, ult, ev]) if (r.error) throw r.error;
+
+      // 1 ponto por hora
+      const novos = hist.data.map(r => ({
+        t: new Date(r.medido_em), nivel: nivelPct(num(r.distancia_cm)),
+        vazao: num(r.vazao_max), bomba: r.bomba_alguma
+      }));
+
+      // o último ponto é a leitura mais recente (valores "ao vivo")
+      const l = ult.data[0];
+      if (l) {
+        const vivo = { t: new Date(l.medido_em), nivel: nivelPct(num(l.distancia_cm)),
+                       vazao: num(l.vazao_lpm), bomba: l.bomba_ligada };
+        const u = novos[novos.length - 1];
+        if (u && Math.floor(vivo.t / 3600000) === Math.floor(u.t / 3600000)) novos[novos.length - 1] = vivo;
+        else novos.push(vivo);
+      }
+
+      if (novos.length === 0) {
+        $('ultima').textContent = 'sem medições nas últimas 24 h';
+        dot.style.background = 'var(--red)';
+        return;
+      }
+      // os gráficos precisam de 2 pontos; na primeira hora há só 1
+      if (novos.length === 1) novos.unshift({ ...novos[0], t: new Date(novos[0].t - 60000) });
+
+      pts.length = 0; pts.push(...novos);
+
+      // eventos em ordem cronológica
+      eventos.length = 0;
+      ev.data.reverse().forEach(e => eventos.push({
+        t: new Date(e.ocorrido_em),
+        tipo: ['falha_fluxo', 'falha_sensor_nivel', 'nivel_critico'].includes(e.tipo) ? 'warn' : 'info',
+        msg: e.mensagem
+      }));
+
+      render();
+
+      // indicador de comunicação
+      const idade = (Date.now() - pts[pts.length - 1].t) / 1000;
+      if (idade > 60) { $('ultima').textContent += ' · SEM COMUNICAÇÃO'; dot.style.background = 'var(--red)'; }
+      else dot.style.background = 'var(--green)';
+      if (calib.distancia_vazia_cm === null || calib.distancia_cheia_cm === null) {
+        $('ultima').textContent += ' · calibração provisória';
+      }
+    } catch (e) {
+      console.error('Dashboard:', e);
+      $('ultima').textContent = 'erro ao ler o banco (veja o Console, F12)';
+      dot.style.background = 'var(--red)';
+    } finally {
+      ocupado = false;
+    }
+  }
+
+  // Tempo real: medição/evento novo dispara atualização (no máx. a cada 4 s)
+  function agendar() { if (Date.now() - ultimo > 4000) carregar(); }
+  sbx.channel('scada')
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'medicoes' }, agendar)
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'eventos' }, agendar)
+    .subscribe();
+
+  // garantia: se o tempo real falhar, atualiza sozinho a cada 15 s
+  setInterval(carregar, 15000);
+  carregar();
+</script>
+</body>
+</html>
