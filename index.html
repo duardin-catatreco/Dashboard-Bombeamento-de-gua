@@ -1,11 +1,3 @@
--- =====================================================================
--- 08_resumo_dashboard.sql  ·  Resumo de 24 h para o gráfico do dashboard
--- Execute UMA vez no SQL Editor (pode repetir sem problema).
--- Devolve 1 linha por hora (a última leitura de cada hora, com a maior
--- vazão e se a bomba ligou em algum momento naquela hora). Assim o site
--- baixa ~24 linhas em vez de dezenas de milhares.
--- Respeita a RLS: só enxerga o que as políticas de leitura pública deixam.
--- =====================================================================
 create or replace function public.resumo_24h(p_device text)
 returns table (
   medido_em     timestamptz,
@@ -32,6 +24,3 @@ as $$
 $$;
 
 grant execute on function public.resumo_24h(text) to anon, authenticated;
-
--- Teste (deve devolver algumas linhas se o ESP32 já enviou dados):
--- select * from public.resumo_24h('esp32_bombeamento_01');
