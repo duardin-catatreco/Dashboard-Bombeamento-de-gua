@@ -179,7 +179,7 @@
 
     <div class="panel-box">
       <p class="label" style="margin-bottom:4px">Últimas 24 horas</p>
-      <div class="legend"><span><i style="background:var(--cyan)"></i>LT-01 nível %</span><span><i style="background:var(--amber)"></i>FT-01 vazão ml/min</span></div>
+      <div class="legend"><span><i style="background:var(--cyan)"></i>LT-01 nível %</span><span><i style="background:var(--amber)"></i>FT-01 vazão mL/min</span></div>
       <div class="chart-box"><svg id="historyChart" viewBox="0 0 780 210" aria-label="Gráfico de nível e vazão nas últimas 24 horas"></svg></div>
     </div>
 
@@ -308,14 +308,14 @@
     $('g-pumpDesde').textContent = desde.replace('desde ', '');
     $('g-pumpHoje').textContent = `≈ ${ligadaMin.toFixed(1)} min (estimado)`;
 
-    $('flowValue').innerHTML = `${fmt(l.vazao, 2)}<small>L/min</small>`;
+    $('flowValue').innerHTML = `${fmt(l.vazao, 2)}<small>mL/min</small>`;
     const ult = pts.slice(-10).filter(x => x.vazao > 0);
     const media = ult.length ? fmt(ult.reduce((s, x) => s + x.vazao, 0) / ult.length, 2) : '0,00';
-    $('avgValue').textContent = `méd. ${media} L/min (bomba ligada)`;
+    $('avgValue').textContent = `méd. ${media} mL/min (bomba ligada)`;
     const maxHoje = fmt(Math.max(...hoje.map(x => x.vazao)), 2);
-    $('g-flow').textContent = `${fmt(l.vazao, 2)} L/min`;
-    $('g-avg').textContent = `${media} L/min`;
-    $('g-max').textContent = `${maxHoje} L/min`;
+    $('g-flow').textContent = `${fmt(l.vazao, 2)} mL/min`;
+    $('g-avg').textContent = `${media} mL/min`;
+    $('g-max').textContent = `${maxHoje} mL/min`;
 
     // volume do dia = soma das subidas de nível entre as leituras
     let volMl = 0;
@@ -343,7 +343,7 @@
       const tr = document.createElement('tr');
       const vol = k === 0 ? '—' : `${fmt(volPorLeitura[k], 0)} mL`;
       tr.innerHTML = `<td class="t">${hhmm(x.t)}</td><td>${x.nivel}%</td>` +
-        `<td>${x.vazao > 0 ? fmt(x.vazao, 2) + ' L/min' : '—'}</td>` +
+        `<td>${x.vazao > 0 ? fmt(x.vazao, 2) + ' mL/min' : '—'}</td>` +
         `<td><span class="chip ${x.bomba ? 'on' : 'off'}">${x.bomba ? 'Ligada' : 'Desligada'}</span></td>` +
         `<td>${vol}</td>`;
       rt.appendChild(tr);
